@@ -226,3 +226,149 @@ config/api_keys.json
 .claude/
 *.bak
 *.backup
+
+# 산사태 분석 프로젝트 특화
+# ======================================
+
+# 민감한 데이터 및 API 키
+api_keys.json
+secrets.json
+credentials.json
+.env.local
+config/local_config.json
+*.key
+*.pem
+*.crt
+auth.json
+
+# 대용량 GIS 데이터 파일들
+*.gpkg
+*.gdb/
+*.mdb
+*.kml
+*.kmz
+*.gml
+*.wfs
+*.wms
+*.xyz
+*.las
+*.laz
+
+# 압축된 데이터 파일들
+*.zip
+*.rar
+*.7z
+*.tar.gz
+*.tgz
+data/external/
+data/raw/
+large_data/
+
+# Sentinel-1 위성 데이터 파일들
+*.SAFE/
+*.SAFE.zip
+*.slc
+*.slc.*
+*.dim
+*.data/
+
+# InSAR 처리 결과 파일들
+*.unw
+*.cor
+*.int
+*.amp
+*.rsc
+*.mli
+*.par
+*.dem
+*.grd
+
+# 분석 결과 파일들
+results/
+output/
+산사태_*.html
+산사태_*.png
+*_analysis.html
+*_chart.png
+*_map.html
+*_report.pdf
+
+# QGIS 관련 파일들
+*.qgs
+*.qgz
+*.qlr
+*.qml
+*.qpt
+qgis_projects/
+
+# 다운로드 임시 파일들
+*.part
+download_temp/
+temp_downloads/
+
+# 계정 정보 및 인증 관련
+copernicus_auth.json
+sentinel_credentials.txt
+esa_credentials.json
+
+# 위성 데이터 및 원격 감지 데이터
+*.tif
+*.tiff
+*.geotiff
+*.nc
+*.nc4
+*.hdf
+*.h4
+*.h5
+*.img
+*.dat
+*.bil
+*.hdr
+*.aux.xml
+
+# 모델 파일들
+models/
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.model
+*.ckpt
+*.pth
+*.pt
+*.onnx
+
+# 로그 파일들
+logs/
+*.log
+landslide_analysis.log
+debug.log
+
+# 데이터베이스 파일들
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# 백업 파일들
+backup/
+backups/
+*.old
+*_backup/
+
+# 중간 처리 파일들
+intermediate/
+processed/
+temp_data/
+
+# 보고서 및 문서 (대용량)
+reports/
+*.pdf
+*.docx
+*.xlsx
+
+# 테스트 데이터
+test_data/
+sample_data/
+dummy_data/
