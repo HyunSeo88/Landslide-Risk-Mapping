@@ -372,3 +372,50 @@ reports/
 test_data/
 sample_data/
 dummy_data/
+
+# LDAPS 기상 데이터 관련
+# ============================
+
+# GRIB2 기상 데이터 파일들 (대용량)
+*.gb2
+*.grb
+*.grb2
+*.grib
+*.grib2
+data/LDAPS/GRIB/
+data/LDAPS/NetCDF/
+
+# KMA API 인증키
+KMA_SERVICE_KEY
+kma_api_key.txt
+api_credentials.txt
+
+# 행정구역 경계 데이터 (대용량 shapefile)
+data/행정구역경계/
+*.cpg
+*.dbf
+*.prj
+*.qix
+*.shx
+
+# 다운로드 로그 파일들
+download_log.txt
+ldaps_download.log
+*_download.log
+
+# 임시 테스트 파일들
+test_*.gb2
+test_*.nc
+test_api.py
+
+# 처리 상태 파일들
+*.status
+processing_status.json
+download_progress.json
+
+# 대용량 CSV 데이터
+LDAPSunique_date.csv
+*_unique_date.csv
+
+# conda 환경 export 파일들 (선택적)
+environment_*.yml

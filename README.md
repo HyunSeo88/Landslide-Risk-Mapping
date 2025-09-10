@@ -60,3 +60,49 @@ Sentinel-1 위성의 6/12일 재방문 주기를 기준으로 하이브리드 �
 
 ### 해결 방안
 실시간 위성 데이터와 기상 정보를 결합한 동적 위험도 평가 시스템 구축
+
+## 데이터 수집 및 처리
+
+### LDAPS 기상 데이터
+
+#### 개요
+- **LDAPS (Limited area Data Assimilation and Prediction System)**: 기상청 국지예보모델
+- **공간 해상도**: 1.5km 격자
+- **시간 해상도**: 1시간 간격
+- **예보 범위**: 48시간 선행시간
+
+#### 데이터 수집
+```bash
+# conda 환경 설정
+conda env create -f environment_ldaps.yml
+conda activate ldaps
+
+# LDAPS 강수량 데이터 다운로드
+python data/LDAPS/ldaps_load_grib.py
+```
+
+#### 처리 과정
+1. **GRIB2 다운로드**: KMA Open API를 통한 원본 기상 데이터 수집
+2. **지역 마스킹**: 대상 지역 (경남·경북·대구·울산·부산) 추출
+3. **NetCDF 변환**: 분석 가능한 격자 데이터로 변환
+4. **시계열 구성**: 24시간 연속 데이터로 재구성
+
+#### 출력 파일
+- **GRIB 원본**: `data/LDAPS/GRIB/l015_YYYYMMDDHHMM_lspr_h000.gb2`
+- **NetCDF 처리본**: `data/LDAPS/NetCDF/LDAPS_Rain_YYYYMMDD.nc`
+
+#### 환경변수 설정
+```bash
+# KMA API 키 설정 (필수)
+set KMA_SERVICE_KEY=your_api_key_here
+```
+
+### 위성 데이터 (예정)
+- **Sentinel-1 SAR**: InSAR 변위 측정
+- **처리 주기**: 6/12일 간격
+- **공간 해상도**: 20m
+
+### 지형 데이터 (예정)
+- **DEM**: 수치표고모델
+- **경사도**: 사면 안정성 분석
+- **토지이용**: 식생 및 개발 현황
