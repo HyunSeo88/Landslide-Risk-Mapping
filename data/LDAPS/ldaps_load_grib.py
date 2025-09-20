@@ -1,28 +1,30 @@
-# ldaps_download_grib_regions.py
+# ldaps_load_grib.py
 # ------------------------------------------------------------
-# GRIB 파일 다운로드 후 NetCDF로 변환하여 지역별 강수량 데이터 처리
-# Requires: requests, pandas, numpy, xarray, geopandas, shapely, pyproj, rioxarray, rasterio, cfgrib
-# Install (conda): conda install -y requests pandas numpy xarray geopandas shapely pyproj rioxarray rasterio cfgrib eccodes
+# GRIB 파일 다운로드 후 NetCDF로 변환하여 전체 LDAPS 강수량 데이터 처리
+# --- 핵심 변경점 요약 ---
+# 1) '해당 일자'의 첫 성공 GRIB에서 lat/lon을 직접 추출(비결정성 제거)
+# 2) NetCDF에 CF-Conventions 스타일의 grid_mapping 변수(crs_wgs84) 추가
+# 3) NetCDF 변수/좌표에 압축(zlib), 청크(chunk) 지정
+# 4) 타임존 플래그와 day 경계 안전장치(옵션) 추가
 # ------------------------------------------------------------
 import os, time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Tuple
 import requests
 import numpy as np
 import pandas as pd
 import xarray as xr
-import geopandas as gpd
-from shapely.ops import unary_union
-from rasterio.features import rasterize
-import rasterio
-from rasterio.transform import Affine
-from pyproj import CRS
+import warnings
+
+# cfgrib timedelta 경고 억제
+warnings.filterwarnings('ignore', category=FutureWarning, module='cfgrib')
 
 # GRIB 파일 다운로드 API 엔드포인트
 GRIB_API_BASE = "https://apihub.kma.go.kr/api/typ06/url/nwp_vars_down.php"
 
-# LCC 좌표계 정의
-LCC_CRS = CRS.from_proj4("+proj=lcc +lat_1=30 +lat_2=60 +lat_0=38 +lon_0=126 +datum=WGS84 +units=m +no_defs")
+# 타임존 설정
+KST = timezone(timedelta(hours=9))  # 필요 시 활성화
+USE_KST = True                      # False면 naive 유지
 
 def download_grib_file(service_key: str, base_time: str, lead_hour: int, variable: str, output_dir: str) -> str:
     """GRIB 파일을 다운로드하고 파일 경로를 반환"""
@@ -74,7 +76,7 @@ def download_grib_file(service_key: str, base_time: str, lead_hour: int, variabl
         print(f"[ERROR] Failed to download {filename}: {e}")
         return None
 
-def grib_to_xarray(grib_file: str) -> xr.Dataset:
+def grib_to_xarray(grib_file: str):
     """GRIB 파일을 xarray Dataset으로 로드"""
     try:
         ds = xr.open_dataset(grib_file, engine='cfgrib')
@@ -82,6 +84,103 @@ def grib_to_xarray(grib_file: str) -> xr.Dataset:
     except Exception as e:
         print(f"[ERROR] Failed to load GRIB {grib_file}: {e}")
         return None
+
+def pick_reference_latlon_from_ds(ds):
+    """당일 처리 중 '처음 성공적으로 로드된 GRIB'의 위경도 2D를 바로 사용"""
+    if 'latitude' in ds.coords and 'longitude' in ds.coords:
+        lat = ds['latitude'].values
+        lon = ds['longitude'].values
+        assert lat.ndim == 2 and lon.ndim == 2, "lat/lon must be 2-D"
+        return lat, lon
+    # cfgrib이 다른 이름을 쓰는 경우 대비
+    for cand_lat, cand_lon in [('lat', 'lon'), ('Latitude', 'Longitude')]:
+        if cand_lat in ds and cand_lon in ds:
+            return ds[cand_lat].values, ds[cand_lon].values
+    raise RuntimeError("No 2-D lat/lon found in GRIB dataset")
+
+def build_daily_netcdf(day: pd.Timestamp, stack, hours, lat2d, lon2d, out_path: str):
+    """개선된 NetCDF 생성 함수 - CF 규약 준수, 압축/청킹 적용"""
+    # 시간 좌표(24h)
+    start = pd.Timestamp(day.date())
+    if USE_KST:
+        start = start.tz_localize(KST)
+        # hours가 이미 timezone 정보를 가지고 있는지 확인
+        processed_hours = []
+        for h in hours:
+            if hasattr(h, 'tzinfo') and h.tzinfo is not None:
+                # 이미 timezone이 있으면 KST로 변환
+                processed_hours.append(h.astimezone(KST) if h.tzinfo != KST else h)
+            else:
+                # timezone이 없으면 KST로 localize
+                processed_hours.append(pd.Timestamp(h).tz_localize(KST))
+        hours = processed_hours
+    full_time = pd.date_range(start, start + pd.Timedelta(hours=23), freq="1h", tz=start.tz)
+
+    ny, nx = stack.shape[1], stack.shape[2]
+    data_full = np.full((24, ny, nx), np.nan, np.float32)
+    
+    # 수집된 시간들을 정렬해 매핑
+    order = np.argsort(hours)
+    for i in order:
+        t = hours[i]
+        idx = int((t - start).total_seconds() // 3600)
+        if 0 <= idx < 24:
+            data_full[idx] = stack[i]
+
+    # NetCDF 저장을 위해 시간을 UTC로 변환 (timezone 정보 제거)
+    if full_time.tz is not None:
+        full_time_utc = full_time.tz_convert('UTC').tz_localize(None)
+        time_attrs = {
+            "standard_name": "time",
+            "long_name": "time", 
+            "timezone": "UTC (converted from KST)",
+            "original_timezone": "KST"
+        }
+    else:
+        full_time_utc = full_time
+        time_attrs = {"standard_name": "time", "long_name": "time"}
+
+    # 좌표/변수 구성
+    ds = xr.Dataset(
+        data_vars={
+            "precipitation": (("time", "y", "x"), data_full,
+                              {"units": "kg m-2 s-1", "long_name": "LDAPS precipitation rate",
+                               "grid_mapping": "crs_wgs84"})
+        },
+        coords={
+            "time": (("time",), full_time_utc, time_attrs),
+            "y": np.arange(ny),
+            "x": np.arange(nx),
+            # CF 권고: lat/lon을 변수로도 보존(좌표로만 두어도 무방하지만 가독성↑)
+            "latitude": (("y", "x"), lat2d, {"standard_name": "latitude", "units": "degrees_north"}),
+            "longitude": (("y", "x"), lon2d, {"standard_name": "longitude", "units": "degrees_east"}),
+        },
+        attrs={
+            "source": "KMA LDAPS (via cfgrib)",
+            "Conventions": "CF-1.8",
+            "title": f"LDAPS precipitation for {day.strftime('%Y-%m-%d')} (full grid)",
+        }
+    )
+
+    # grid_mapping 변수: 위경도 좌표계를 명시 (후속 파이프라인이 인지 가능)
+    ds["crs_wgs84"] = xr.DataArray(0, attrs={
+        "grid_mapping_name": "latitude_longitude",
+        "longitude_of_prime_meridian": 0.0,
+        "semi_major_axis": 6378137.0,
+        "inverse_flattening": 298.257223563
+    })
+
+    # 압축/청크 옵션
+    comp = dict(zlib=True, complevel=4)
+    encoding = {
+        "precipitation": dict(chunksizes=(1, min(256, ny), min(256, nx)), **comp, dtype="float32"),
+        "latitude":      dict(chunksizes=(min(256, ny), min(256, nx)), **comp, dtype="float32"),
+        "longitude":     dict(chunksizes=(min(256, ny), min(256, nx)), **comp, dtype="float32"),
+    }
+
+    ds.to_netcdf(out_path, encoding=encoding)
+    print(f"[SAVE] {out_path}")
+    ds.close()
 
 def select_forecast_times_for_day(day: datetime) -> List[Tuple[str, int]]:
     """하루 24시간을 커버하는 예보시간 조합 생성"""
@@ -96,76 +195,7 @@ def select_forecast_times_for_day(day: datetime) -> List[Tuple[str, int]]:
     
     return calls
 
-def union_target_regions(
-    admin_shp: str,
-    target_names: List[str],
-    to_crs: CRS,
-    name_col: str = None,
-    encoding: str = None
-):
-    """행정구역 shapefile에서 대상 지역들을 union하여 반환"""
-    gdf = gpd.read_file(admin_shp, encoding=encoding) if encoding else gpd.read_file(admin_shp)
-    
-    if gdf.crs is None:
-        gdf = gdf.set_crs(4326)
-    
-    # 컬럼명 자동 탐지
-    if name_col is None:
-        candidates = ["CTP_KOR_NM", "SIDO", "SIG_KOR_NM", "ADM_NM", "adm_nm", "NAME_1", "CTP_ENG_NM"]
-        name_col = next((c for c in candidates if c in gdf.columns), None)
-        if name_col is None:
-            raise ValueError(f"시·도명 컬럼을 찾지 못함. 사용 가능한 컬럼: {list(gdf.columns)}")
-    
-    # 이름 정규화
-    def norm(s: pd.Series) -> pd.Series:
-        return s.astype(str).str.strip().str.replace(r"\s+", "", regex=True)
-    
-    gdf["_name_"] = norm(gdf[name_col])
-    target_norm = [n.replace(" ", "") for n in target_names]
-    
-    # 대상 선택 후 좌표계 변환
-    sub = gdf.loc[gdf["_name_"].isin(target_norm)]
-    if sub.empty:
-        uniq = sorted(gdf["_name_"].unique())[:30]
-        raise ValueError(f"선택한 시·도명이 매칭되지 않음: {target_names}\\n예시 값(일부): {uniq}")
-    
-    sub = sub.to_crs(to_crs)
-    return unary_union(sub.geometry)
 
-def make_mask_from_grib(ds: xr.Dataset, geom_union) -> np.ndarray:
-    """GRIB 데이터의 좌표에 기반한 마스크 생성"""
-    try:
-        # 위경도 좌표 가져오기
-        if 'latitude' in ds.coords and 'longitude' in ds.coords:
-            lats = ds.latitude.values
-            lons = ds.longitude.values
-        else:
-            print("[WARNING] No lat/lon coordinates found in GRIB")
-            return None
-            
-        # 좌표를 LCC로 변환하여 마스크 생성
-        from pyproj import Transformer
-        transformer = Transformer.from_crs("EPSG:4326", LCC_CRS)
-        
-        # 격자 변환
-        x_lcc, y_lcc = transformer.transform(lats.flatten(), lons.flatten())
-        x_lcc = x_lcc.reshape(lats.shape)
-        y_lcc = y_lcc.reshape(lats.shape)
-        
-        # 각 격자점이 지역 내부에 있는지 확인
-        from shapely.geometry import Point
-        mask = np.zeros(lats.shape, dtype=bool)
-        
-        for i in range(lats.shape[0]):
-            for j in range(lats.shape[1]):
-                point = Point(x_lcc[i, j], y_lcc[i, j])
-                mask[i, j] = geom_union.contains(point)
-        
-        return mask
-        
-    except Exception as e:
-        print(f"[ERROR] Failed to create mask: {e}")
-        return None
 
 def main():
     SERVICE_KEY = os.environ.get("KMA_SERVICE_KEY", "5LGEH7S2SVSxhB-0tnlUlA")
@@ -173,7 +203,7 @@ def main():
         raise SystemExit("환경변수 KMA_SERVICE_KEY 가 필요합니다.")
     print(f"[INFO] Using API key: {SERVICE_KEY[:10]}...")
     
-    # 원본 기간 유지
+    # 처리할 날짜 범위
     START = "2020-03-11"
     END   = "2020-09-19"
     
@@ -181,19 +211,6 @@ def main():
     OUT_DIR = r"D:\Landslide\data\LDAPS\NetCDF"  # NetCDF 파일 저장
     os.makedirs(GRIB_DIR, exist_ok=True)
     os.makedirs(OUT_DIR, exist_ok=True)
-    
-    # 행정구역 설정
-    ADMIN_SHP = r"D:\Landslide\data\행정구역경계\행정구역_시도.shp"
-    TARGET_SIDOS = ["경상남도","대구","경상북도","울산","부산"]
-    
-    # 지역 경계 union
-    geom_union = union_target_regions(
-        ADMIN_SHP,
-        TARGET_SIDOS,
-        LCC_CRS,
-        name_col="CTP_ENG_NM",
-        encoding=None
-    )
     
     # 강수량 변수
     VARIABLES = ["lspr"]  # Large-scale precipitation rate
@@ -206,6 +223,8 @@ def main():
         
         daily_data = []
         valid_times = []
+        reference_lat2d = None
+        reference_lon2d = None
         
         for base_time, lead_hour in forecast_times:
             for variable in VARIABLES:
@@ -221,31 +240,36 @@ def main():
                     if ds is None:
                         continue
                     
-                    # 마스크 적용
-                    mask = make_mask_from_grib(ds, geom_union)
-                    if mask is None:
-                        print(f"[WARNING] Could not create mask for {grib_file}")
-                        continue
+                    # 첫 번째 성공 GRIB에서 lat/lon 추출 (비결정성 제거)
+                    if reference_lat2d is None:
+                        try:
+                            reference_lat2d, reference_lon2d = pick_reference_latlon_from_ds(ds)
+                            print(f"[INFO] Reference coordinates extracted from {grib_file}")
+                            print(f"[INFO] Grid shape: {reference_lat2d.shape}")
+                            print(f"[INFO] Lat: {reference_lat2d.min():.3f}~{reference_lat2d.max():.3f}")
+                            print(f"[INFO] Lon: {reference_lon2d.min():.3f}~{reference_lon2d.max():.3f}")
+                        except Exception as e:
+                            print(f"[WARNING] Could not extract reference coordinates: {e}")
                     
                     # 데이터 변수 식별
                     data_vars = list(ds.data_vars.keys())
                     if not data_vars:
                         print(f"[WARNING] No data variables in {grib_file}")
+                        ds.close()
                         continue
                     
                     data_var = data_vars[0]  # 첫 번째 데이터 변수 사용
                     data_array = ds[data_var].values
                     
-                    # 마스크 적용
-                    masked_data = np.where(mask, data_array, np.nan)
-                    
                     # 유효시간 계산
                     base_dt = datetime.strptime(base_time, "%Y%m%d%H%M")
+                    if USE_KST:
+                        base_dt = base_dt.replace(tzinfo=KST)
                     valid_time = base_dt + timedelta(hours=lead_hour)
                     
                     # 해당 날짜에 속하는 시간만 수집
                     if valid_time.date() == day.date():
-                        daily_data.append(masked_data)
+                        daily_data.append(data_array)
                         valid_times.append(valid_time)
                     
                     ds.close()  # 메모리 해제
@@ -260,55 +284,18 @@ def main():
         if not daily_data:
             print(f"[SKIP] No data for {day.date()}")
             continue
+            
+        if reference_lat2d is None:
+            print(f"[ERROR] No reference coordinates found for {day.date()}")
+            continue
         
-        # 시간순 정렬
-        if len(daily_data) > 1:
-            sorted_indices = sorted(range(len(valid_times)), key=lambda i: valid_times[i])
-            daily_data = [daily_data[i] for i in sorted_indices]
-            valid_times = [valid_times[i] for i in sorted_indices]
-        
-        # xarray Dataset 생성
+        # 데이터 스택 생성
         data_stack = np.stack(daily_data, axis=0)
+        print(f"[INFO] Collected {len(daily_data)} time steps for {day.date()}")
         
-        # 시간 차원 생성 (24시간 격자, 누락된 시간은 NaN)
-        start_time = pd.Timestamp(day.date())
-        full_time_range = pd.date_range(start_time, start_time + pd.Timedelta(hours=23), freq="1H")
-        
-        # 24시간 배열 초기화
-        full_data = np.full((24, data_stack.shape[1], data_stack.shape[2]), np.nan, dtype=np.float32)
-        
-        # 데이터 매핑
-        for i, vt in enumerate(valid_times):
-            hour_idx = (vt - start_time).total_seconds() // 3600
-            if 0 <= hour_idx < 24:
-                full_data[int(hour_idx)] = daily_data[i]
-        
-        # xarray Dataset 생성
-        ds_daily = xr.Dataset(
-            {"precipitation": (("time", "y", "x"), full_data)},
-            coords={
-                "time": full_time_range,
-                "y": np.arange(data_stack.shape[1]),
-                "x": np.arange(data_stack.shape[2])
-            }
-        )
-        
-        # 속성 추가
-        ds_daily["precipitation"].attrs.update(
-            units="kg m**-2 s**-1",
-            long_name="LDAPS precipitation rate (masked for target regions)"
-        )
-        ds_daily.attrs.update(
-            regions=", ".join(TARGET_SIDOS),
-            crs=str(LCC_CRS.to_wkt())
-        )
-        
-        # NetCDF 파일로 저장
+        # NetCDF 생성 및 저장
         output_file = os.path.join(OUT_DIR, f"LDAPS_Rain_{day.strftime('%Y%m%d')}.nc")
-        ds_daily.to_netcdf(output_file)
-        print(f"[SAVE] {output_file}")
-        
-        ds_daily.close()
+        build_daily_netcdf(day, data_stack, valid_times, reference_lat2d, reference_lon2d, output_file)
 
 if __name__ == "__main__":
     main()
