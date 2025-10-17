@@ -1,0 +1,183 @@
+# Stage 2: Dual-Stream Hierarchical GNN-U-Net Configuration
+# 
+# Architecture:
+# - State Encoder (CNN): High-resolution static terrain features
+# - Trigger Encoder (ConvLSTM): Temporal dynamic sequences (window_size=5)
+# - Cross-Attention Fusion: State-Trigger interaction modeling
+# - Attention-MIL: Interpretable weakly supervised learning
+#
+# Prerequisites:
+# 1. Complete Stage 1 training (GNN pre-training)
+# 2. Generate GNN susceptibility raster
+# 3. Update paths below
+
+experiment:
+  name: "stage2_dual_unet"
+  model_type: "dual_unet"
+  seed: 42
+  device: "cuda"
+  save_dir: "experiments/stage2_dual"
+
+data:
+  # Graph data (for GNN architecture, not training)
+  graph_path: "data/model_ready/graph_data_v3.pt"
+  
+  # Samples CSV
+  samples_path: "data/model_ready/balanced_samples.csv"
+  
+  # Slope ID raster
+  slope_id_raster_path: "data/model_ready/zone_raster_gyeongnam_5179_30m.tif"
+  
+  # Slope bounding boxes cache
+  slope_bboxes_cache_path: "data/model_ready/slope_bboxes.pkl"
+  
+  # ===== IMPORTANT: UPDATE AFTER STAGE 1 =====
+  # GNN susceptibility raster (pre-generated from Stage 1)
+  gnn_raster_path: "experiments/stage1_gnn/20251017_150408/gnn_susceptibility_30m.tif"
+  
+  # ===== State Stream: Static Terrain Features =====
+  static_raster_dir: "data/model_ready/DEM_OUTPUTS"
+  static_variables:
+    - "slope_deg"      # Slope angle (direct instability)
+    - "curv_plan"      # Plan curvature (water flow convergence)
+    - "curv_prof"      # Profile curvature (acceleration/deceleration)
+    - "twi_use"        # Topographic Wetness Index (saturation potential)
+    - "tri_sd3"        # Terrain Ruggedness Index (micro-topography)
+  
+  # Rationale for selection:
+  # - slope_deg: Primary driver of slope instability
+  # - curv_plan/prof: Controls water flow and stress concentration
+  # - twi_use: Indicates water accumulation and saturation
+  # - tri_sd3: Captures fine-scale terrain texture
+  #
+  # Excluded:
+  # - aspect_deg: Directional info better captured by GNN context
+  # - accm: Flow accumulation highly correlated with TWI
+  # - lnspi_use: Stream power less relevant for texture
+  
+  # ===== Trigger Stream: Temporal Dynamic Features =====
+  dynamic_raster_base: "data/processed/gyeongnam/LDAPS/TIF_5179_30m_20190101_20200930_clipped"
+  
+  # Dynamic variables configuration (modular design)
+  # Format: {group_name: [channel1, channel2, ...]}
+  dynamic_variables:
+    rainfall:
+      - "acc3d"
+      - "acc7d"
+      - "peak1h"
+  
+  # Temporal configuration
+  window_size: 5       # 5-day temporal window for ConvLSTM
+  patch_size: 128
+  
+  # Date range
+  start_date: "20190101"
+  end_date: "20200930"
+
+stage2:
+  # ===== IMPORTANT: UPDATE AFTER STAGE 1 =====
+  # Stage 1 checkpoint path
+  stage1_checkpoint_path: "experiments/stage1_gnn/20251017_150408/checkpoints/model_stage1_best.pth"
+  
+  # Freeze GNN weights
+  freeze_gnn: true
+
+model_dual:
+  # ===== Stage 1: GNN (Architecture must match Stage 1) =====
+  gnn_type: "sage"     # Must match Stage 1
+  gnn_hidden: 64
+  gnn_layers: 3
+  gnn_dropout: 0.3
+  gat_heads: 4
+  
+  # ===== State Encoder (CNN) =====
+  state_base_channels: 32
+  
+  # ===== Trigger Encoder (ConvLSTM) =====
+  trigger_hidden_channels: 64
+  trigger_num_layers: 2
+  
+  # ===== Cross-Attention Fusion =====
+  fusion_num_heads: 4
+  fusion_type: "concat"  # 'concat' or 'add'
+  
+  # ===== Decoder =====
+  decoder_depth: 4
+
+training_dual:
+  # Basic settings
+  batch_size: 24        # Reduced due to temporal dimension (5 timesteps)
+  epochs: 100
+  learning_rate: 0.00005
+  weight_decay: 0.0001
+  
+  # Loss settings
+  # (Attention-MIL loss is built into model)
+  pos_weight: 1.0      # Adjust for class imbalance
+  
+  # Validation
+  val_ratio: 0.2
+  
+  # Learning rate scheduler
+  use_scheduler: true
+  scheduler_type: "warmup_cosine"
+  warmup_epochs: 10
+  min_lr: 1.0e-7
+  
+  # Gradient clipping
+  grad_clip_value: 1.0
+  
+  # Mixed precision training
+  use_amp: true
+  
+  # Early stopping
+  early_stopping_patience: 20
+  monitor_metric: "val_auc_roc"
+  
+  # Logging
+  log_interval: 5
+  use_tensorboard: true
+
+# Feature names (for interpretability)
+feature_names:
+  # GNN channel
+  gnn:
+    - "gnn_susceptibility"
+  
+  # State channels (static terrain)
+  state:
+    - "slope_deg"
+    - "curv_plan"
+    - "curv_prof"
+    - "twi"
+    - "tri"
+  
+  # Trigger channels (dynamic, per timestep)
+  trigger:
+    - "acc3d"
+    - "acc7d"
+    - "peak1h"
+    # - "displacement"  # Uncomment when InSAR added
+    # - "ndvi_diff"     # Uncomment when NDVI added
+
+# Instructions:
+# 1. Train Stage 1 first:
+#    python src/models/train_stage1_gnn.py --config configs/stage1_gnn.yaml
+#
+# 2. Generate GNN raster:
+#    python src/models/generate_gnn_raster.py \
+#      --checkpoint experiments/stage1_gnn/<timestamp>/checkpoints/model_stage1_best.pth \
+#      --output experiments/stage1_gnn/<timestamp>/gnn_susceptibility_30m.tif
+#
+# 3. Update paths in this config:
+#    - data.gnn_raster_path
+#    - stage2.stage1_checkpoint_path
+#
+# 4. Train Stage 2 (Dual-Stream):
+#    python src/models/train_stage2_dual.py --config configs/stage2_dual_unet.yaml
+#
+# 5. To add new dynamic variables (e.g., InSAR, NDVI):
+#    - Uncomment corresponding lines in data.dynamic_variables
+#    - Ensure raster files are available in dynamic_raster_base
+#    - No code changes needed (modular design)
+

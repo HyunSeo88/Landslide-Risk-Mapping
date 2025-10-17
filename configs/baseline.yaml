@@ -1,0 +1,79 @@
+# Baseline Configuration: GraphSAGE + Rainfall Only
+# Single train/val split with standard settings
+
+experiment:
+  name: "baseline_sage_rainfall_only"
+  seed: 42
+  device: "cuda"  # "cuda" or "cpu"
+  save_dir: "experiments/baseline_sage"
+
+data:
+  graph_path: "data/model_ready/graph_data_v3.pt"
+  rainfall_path: "data/model_ready/ldaps_slope_statistics.csv"
+  samples_path: "data/model_ready/balanced_samples.csv"
+
+  window_size: 5
+  start_date: "20200311"
+  end_date: "20200920"
+
+  # Dynamic feature configuration
+  use_insar: false
+  use_ndvi: false
+  insar_path: null
+  ndvi_path: null
+
+model:
+  gnn_type: "sage"  # "sage" or "gat"
+  gnn_hidden: 128
+  gnn_layers: 2
+  rnn_hidden: 64
+  rnn_layers: 2
+  dropout: 0.3
+  gat_heads: 4  # Only used for GAT
+
+training:
+  # Basic settings
+  batch_size: 256
+  epochs: 200
+  learning_rate: 0.001
+  weight_decay: 0.0
+
+  # Loss function
+  loss_type: "weighted_bce"  # "weighted_bce" or "focal"
+  pos_weight: 1.0  # For weighted BCE
+
+  # Validation
+  val_ratio: 0.2
+  use_kfold: false
+  k_folds: 5
+
+  # Negative sampling
+  resample_negatives: true  # Resample each epoch
+  sampling_strategy: "temporal"  # "random", "temporal", "mixed"
+  hard_mining_start_epoch: 5  # Start hard negative mining after epoch N
+  hard_mining_ratio: 0.5  # Ratio of hard negatives when mining
+
+  # Optimizer
+  optimizer: "adamw"  # "adam", "adamw", "sgd"
+
+  # Learning rate scheduler
+  use_warmup: true
+  warmup_epochs: 5
+  scheduler: "cosine"  # "cosine", "reduce_on_plateau", "step"
+  min_lr: 1.0e-6
+
+  # Gradient clipping
+  use_grad_clip: true
+  grad_clip_value: 1.0
+
+  # Mixed precision training
+  use_amp: true  # Automatic Mixed Precision (FP16)
+
+  # Early stopping
+  early_stopping_patience: 15
+  monitor_metric: "val_auc_roc"  # "val_loss", "val_auc_roc", "val_f1"
+
+  # Logging
+  log_interval: 10  # Log every N batches
+  save_best_only: false  # Save both best and final
+  use_tensorboard: true

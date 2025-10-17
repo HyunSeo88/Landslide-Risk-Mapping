@@ -1,0 +1,176 @@
+# Stage 2: U-Net Training Configuration with Frozen GNN
+# Trains U-Net with pre-trained frozen GNN and high-resolution static rasters
+#
+# Input channels (12 total):
+# - Channel 0: GNN susceptibility (pre-generated from Stage 1)
+# - Channels 1-8: High-resolution static rasters (DEM derivatives)
+# - Channels 9-11: Dynamic rainfall rasters (acc3d, acc7d, peak1h)
+#
+# Purpose:
+# - Learn pixel-level risk patterns using GNN context + high-res texture + dynamics
+# - Overcome information bottleneck by providing original spatial details
+# - Generate detailed risk maps with slope-level consistency
+#
+# Prerequisites:
+# 1. Complete Stage 1 training
+# 2. Generate GNN susceptibility raster using generate_gnn_raster.py
+# 3. Update stage1_checkpoint_path and gnn_raster_path below
+
+experiment:
+  name: "stage2_unet_finetuning"
+  model_type: "unet_stage2"
+  seed: 42
+  device: "cuda"  # "cuda" or "cpu"
+  save_dir: "experiments/stage2_unet"
+
+data:
+  # Graph data (for compatibility, GNN forward not used in training)
+  graph_path: "data/model_ready/graph_data_v3.pt"
+  
+  # Samples CSV
+  samples_path: "data/model_ready/balanced_samples.csv"
+  
+  # Slope polygons (unused in patch mode, kept for compatibility)
+  slope_polygons_path: "data/processed/gyeongnam/SU/slope_properties_v3.gpkg"
+  
+  # Slope ID raster
+  slope_id_raster_path: "data/model_ready/zone_raster_gyeongnam_5179_30m.tif"
+  
+  # Slope bounding boxes cache
+  slope_bboxes_cache_path: "data/model_ready/slope_bboxes.pkl"
+  
+  # Reference raster (for metadata)
+  reference_raster_path: "data/processed/gyeongnam/LDAPS/zone_raster_gyeongnam_5179_30m.tif"
+  
+  # ===== IMPORTANT: UPDATE THESE PATHS AFTER STAGE 1 =====
+  # GNN susceptibility raster (pre-generated from Stage 1)
+  # Replace <timestamp> with actual experiment timestamp
+  gnn_raster_path: "experiments/stage1_gnn/20251017_150408/gnn_susceptibility_30m.tif"
+  
+  # High-resolution static rasters (8 channels)
+  static_raster_dir: "data/model_ready/DEM_OUTPUTS"
+  static_rasters:
+    - "slope_deg.tif"       # Channel 1: Slope angle
+    - "aspect_deg.tif"      # Channel 2: Aspect
+    - "curv_plan.tif"       # Channel 3: Plan curvature
+    - "curv_prof.tif"       # Channel 4: Profile curvature
+    - "twi_use.tif"         # Channel 5: Topographic Wetness Index
+    - "lnspi_use.tif"       # Channel 6: Stream Power Index
+    - "tri_sd3.tif"         # Channel 7: Terrain Ruggedness Index
+    - "accm.tif"            # Channel 8: Flow accumulation
+  
+  # Dynamic rainfall rasters (3 channels)
+  raster_base_path: "data/processed/gyeongnam/LDAPS/TIF_5179_30m_20190101_20200930_clipped"
+  dynamic_variables:
+    - "acc3d"      # 3-day accumulated rainfall
+    - "acc7d"      # 7-day accumulated rainfall
+    - "peak1h"     # Peak 1-hour rainfall
+  
+  # Patch-based learning
+  patch_size: 128  # 128x128 pixel patches
+  
+  # Date range
+  start_date: "20190101"
+  end_date: "20200930"
+
+stage2:
+  # ===== IMPORTANT: UPDATE THIS PATH AFTER STAGE 1 =====
+  # Stage 1 checkpoint path
+  # Replace <timestamp> with actual experiment timestamp
+  stage1_checkpoint_path: "experiments/stage1_gnn/20251017_150408/checkpoints/model_stage1_best.pth"  
+  # Freeze GNN weights
+  freeze_gnn: true
+
+model_unet:
+  # ===== Stage 1: GNN (Architecture must match Stage 1) =====
+  gnn_type: "sage"  # Must match Stage 1
+  gnn_hidden: 64
+  gnn_layers: 3
+  gnn_dropout: 0.3
+  gat_heads: 4
+  
+  # ===== Stage 2: U-Net =====
+  # Note: Input channels are calculated automatically (12 = 1 + 8 + 3)
+  unet_base_channels: 32  # Memory-efficient
+  unet_depth: 3           # 3 down/up blocks
+
+training_stage2:
+  # Basic settings
+  batch_size: 16  # Reduced due to more channels (12 vs 4)
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  
+  # MIL settings
+  mil_aggregation: "max"  # "max", "mean", or "lse"
+  
+  # Loss function
+  loss_type: "bce"
+  pos_weight: 1.0
+  
+  # Validation
+  val_ratio: 0.2
+  
+  # Learning rate scheduler
+  use_scheduler: true
+  scheduler_type: "warmup_cosine"
+  warmup_epochs: 10
+  min_lr: 1.0e-7
+  
+  # For plateau scheduler (alternative)
+  scheduler_patience: 5
+  scheduler_factor: 0.5
+  
+  # Gradient clipping
+  grad_clip_value: 1.0
+  
+  # Mixed precision training
+  use_amp: true
+  
+  # Early stopping
+  early_stopping_patience: 20
+  monitor_metric: "val_auc_roc"
+  
+  # Logging
+  log_interval: 5
+  use_tensorboard: true
+
+# Feature names (for interpretability)
+feature_names:
+  # GNN channel (pre-computed)
+  gnn:
+    - "gnn_susceptibility"
+  
+  # High-resolution static channels
+  static:
+    - "slope_deg"
+    - "aspect_deg"
+    - "curv_plan"
+    - "curv_prof"
+    - "twi"
+    - "spi"
+    - "tri"
+    - "flow_accum"
+  
+  # Dynamic channels
+  dynamic:
+    - "acc3d"
+    - "acc7d"
+    - "peak1h"
+
+# Instructions:
+# 1. Train Stage 1 first:
+#    python src/models/train_stage1_gnn.py --config configs/stage1_gnn.yaml
+#
+# 2. Generate GNN raster:
+#    python src/models/generate_gnn_raster.py \
+#      --checkpoint experiments/stage1_gnn/<timestamp>/checkpoints/model_stage1_best.pth \
+#      --output experiments/stage1_gnn/<timestamp>/gnn_susceptibility_30m.tif
+#
+# 3. Update paths in this config:
+#    - data.gnn_raster_path
+#    - stage2.stage1_checkpoint_path
+#
+# 4. Train Stage 2:
+#    python src/models/train_stage2_unet.py --config configs/stage2_unet.yaml
+

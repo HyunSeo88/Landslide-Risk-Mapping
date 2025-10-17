@@ -1,0 +1,103 @@
+# Stage 1: GNN Pre-training Configuration
+# Trains GNN only with slope-level labels using standard BCE loss
+#
+# Purpose:
+# - Learn static susceptibility patterns at slope level
+# - Pre-train GNN as feature extractor for Stage 2
+# - Generate basal susceptibility map
+#
+# Output:
+# - model_stage1_best.pth (GNN weights for Stage 2 initialization)
+# - Training curves and metrics
+
+experiment:
+  name: "stage1_gnn_pretraining"
+  model_type: "gnn_only"
+  seed: 42
+  device: "cuda"  # "cuda" or "cpu"
+  save_dir: "experiments/stage1_gnn"
+
+data:
+  # Graph data (static features + graph structure)
+  graph_path: "data/model_ready/graph_data_v3.pt"
+  
+  # Samples CSV (cat, event_date, label)
+  samples_path: "data/model_ready/balanced_samples.csv"
+  
+  # Slope ID raster (for GNN raster generation later)
+  slope_id_raster_path: "data/model_ready/zone_raster_gyeongnam_5179_30m.tif"
+  
+  # Date range
+  start_date: "20190101"
+  end_date: "20200930"
+
+model_gnn:
+  # GNN architecture
+  gnn_type: "sage"  # "sage" or "gat"
+  gnn_hidden: 64
+  gnn_layers: 3
+  gnn_dropout: 0.3
+  gat_heads: 4  # Only for GAT
+
+training_stage1:
+  # Basic settings
+  batch_size: 256  # Slope-level, larger batch possible
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  
+  # Loss function
+  loss_type: "bce"  # Binary cross-entropy
+  pos_weight: 1.0  # Positive class weight (adjust for class imbalance)
+  
+  # Validation
+  val_ratio: 0.2  # 80% train, 20% val
+  
+  # Learning rate scheduler
+  use_scheduler: true
+  scheduler_type: "warmup_cosine"  # "warmup_cosine", "cosine", or "plateau"
+  warmup_epochs: 10
+  min_lr: 1.0e-7
+  
+  # For plateau scheduler (alternative)
+  scheduler_patience: 5
+  scheduler_factor: 0.5
+  
+  # Gradient clipping
+  grad_clip_value: 1.0
+  
+  # Mixed precision training
+  use_amp: true  # FP16 for speed
+  
+  # Early stopping
+  early_stopping_patience: 20
+  monitor_metric: "val_auc_roc"  # "val_auc_roc", "val_f1", "val_loss"
+  
+  # Logging
+  log_interval: 10  # Log every N batches
+
+# Feature names (for interpretability)
+feature_names:
+  static:
+    - "slope_average"
+    - "slope_std"
+    - "aspect_sin"
+    - "aspect_cos"
+    - "elevation_average"
+    - "elevation_std"
+    - "curvature_average"
+    - "curvature_std"
+    - "twi_average"
+    - "twi_std"
+    - "spi_average"
+    - "spi_std"
+    - "rock2_average"
+    - "soil1_average"
+    - "soil2_average"
+    - "dist_road"
+    - "dist_river"
+    - "dist_fault"
+    - "road_density"
+    - "river_density"
+    - "fault_density"
+

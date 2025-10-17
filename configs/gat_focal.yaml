@@ -1,0 +1,68 @@
+# GAT + Focal Loss Configuration
+# For testing different GNN architecture and loss function
+
+experiment:
+  name: "gat_focal_rainfall_only"
+  seed: 42
+  device: "cuda"
+  save_dir: "experiments/gat_focal"
+
+data:
+  graph_path: "data/model_ready/graph_data.pt"
+  rainfall_path: "data/model_ready/ldaps_slope_statistics.csv"
+  samples_path: "data/model_ready/balanced_samples.csv"
+
+  window_size: 5
+  start_date: "20200511"
+  end_date: "20200920"
+
+  use_insar: false
+  use_ndvi: false
+  insar_path: null
+  ndvi_path: null
+
+model:
+  gnn_type: "gat"  # Using GAT instead of SAGE
+  gnn_hidden: 64
+  gnn_layers: 2
+  rnn_hidden: 64
+  rnn_layers: 2
+  dropout: 0.3
+  gat_heads: 4
+
+training:
+  batch_size: 256
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0
+
+  loss_type: "focal"  # Using Focal Loss
+  pos_weight: 1.0
+
+  val_ratio: 0.2
+  use_kfold: false
+  k_folds: 5
+
+  resample_negatives: true
+  sampling_strategy: "temporal"
+  hard_mining_start_epoch: 5
+  hard_mining_ratio: 0.5
+
+  optimizer: "adam"
+
+  use_warmup: true
+  warmup_epochs: 5
+  scheduler: "cosine"
+  min_lr: 1.0e-6
+
+  use_grad_clip: true
+  grad_clip_value: 1.0
+
+  use_amp: true
+
+  early_stopping_patience: 15
+  monitor_metric: "val_auc_roc"
+
+  log_interval: 10
+  save_best_only: false
+  use_tensorboard: true

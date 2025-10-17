@@ -1,0 +1,154 @@
+# Hierarchical GNN-U-Net Configuration
+# Two-stage model with Multiple Instance Learning (MIL)
+#
+# Memory Notes:
+# - Full raster: 4862×5040 pixels (~24.5M pixels)
+# - Batch size 1 recommended for GPU < 16GB
+# - Use AMP (FP16) for 50% memory reduction
+# - Lightweight U-Net: base_channels=32, depth=3
+
+experiment:
+  name: "hierarchical_gnn_unet"
+  model_type: "unet"  # Distinguish from existing "gnn_rnn"
+  seed: 42
+  device: "cuda"  # "cuda" or "cpu"
+  save_dir: "experiments/hierarchical_unet"
+
+data:
+  # Graph data (static features)
+  graph_path: "data/model_ready/graph_data_v3.pt"
+  
+  # Samples CSV
+  samples_path: "data/model_ready/balanced_samples.csv"
+  
+  # Slope polygons (for pixel mapping)
+  slope_polygons_path: "data/processed/gyeongnam/SU/slope_properties_v3.gpkg"
+  
+  # Dynamic raster data
+  raster_base_path: "data/processed/gyeongnam/LDAPS/TIF_5179_30m_20190101_20200930_clipped"
+  
+  # Reference raster (for metadata: CRS, bounds, resolution)
+  reference_raster_path: "data/processed/gyeongnam/LDAPS/zone_raster_gyeongnam_5179_30m.tif"
+  
+  # Patch-based learning configuration
+  patch_size: 128  # Patch size for memory-efficient training
+  slope_id_raster_path: "data/model_ready/zone_raster_gyeongnam_5179_30m.tif"
+  slope_bboxes_cache_path: "data/model_ready/slope_bboxes.pkl"
+  
+  # Dynamic features configuration
+  # Note: For U-Net (pixel-level), we use raw raster values, NOT slope-level statistics
+  dynamic_variables:
+    - "acc3d"      # 3-day accumulated rainfall
+    - "acc7d"      # 7-day accumulated rainfall
+    - "peak1h"     # Peak 1-hour rainfall
+  
+  dynamic_statistics: []  # Empty: raw pixel values (not mean/max per slope)
+  
+  # Date range
+  start_date: "20190101"
+  end_date: "20200930"
+
+model_unet:
+  # ===== Stage 1: GNN (Static Susceptibility) =====
+  gnn_type: "sage"  # "sage" or "gat"
+  gnn_hidden: 64
+  gnn_layers: 2
+  gnn_dropout: 0.3
+  gat_heads: 4  # Only for GAT
+  
+  # ===== Stage 2: U-Net (Dynamic Risk) =====
+  # Input channels: 1 (GNN output) + 3 (acc3d, acc7d, peak1h raw values)
+  unet_base_channels: 32  # Reduced from 64 for memory efficiency
+  unet_depth: 3           # Reduced from 4 (max channels: 32→64→128→256)
+
+training_mil:
+  # Basic settings
+  batch_size: 32  # Patch-based allows larger batch
+  epochs: 100
+  learning_rate: 0.001  # Increased for better learning (was 0.0001)
+  weight_decay: 0.0001
+  
+  # MIL-specific settings
+  mil_aggregation: "max"  # "max", "mean", or "lse" (log-sum-exp)
+  
+  # Loss function
+  loss_type: "bce"  # "bce" or "focal"
+  pos_weight: 1.0  # Positive class weight (for imbalanced data)
+  
+  # Training strategy
+  end_to_end: true  # Train GNN and U-Net together
+  # If false, train in two stages: GNN first, then U-Net
+  
+  # Validation
+  val_ratio: 0.2  # 80% train, 20% val
+  
+  # Learning rate scheduler (Warmup + Cosine Annealing)
+  use_scheduler: true
+  scheduler_type: "warmup_cosine"  # "warmup_cosine", "cosine", or "plateau"
+  warmup_epochs: 10            # Warmup period (LR increases from 1% to 100%)
+  min_lr: 1.0e-7               # Minimum LR for cosine annealing
+  
+  # For plateau scheduler (adaptive, alternative option)
+  scheduler_patience: 5        # Reduce LR if no improvement for N epochs
+  scheduler_factor: 0.5        # New LR = LR × factor
+  
+  # Gradient clipping
+  grad_clip_value: 1.0
+  
+  # Mixed precision training (saves ~50% memory)
+  use_amp: true  # FP16 for memory efficiency and speed
+  
+  # Early stopping
+  early_stopping_patience: 20  # Increased from 15 to allow more patience
+  monitor_metric: "val_auc_roc"  # "val_loss", "val_auc_roc", "val_f1"
+  
+  # Logging
+  log_interval: 5  # Log every N batches
+  use_tensorboard: true
+
+# SHAP analysis configuration
+shap_analysis:
+  enable: true
+  
+  # Stage 1: Static features
+  static_proxy_model: "random_forest"  # "xgboost" or "random_forest"
+  static_max_samples: 1000  # Max samples for SHAP computation
+  
+  # Stage 2: Dynamic channels
+  dynamic_explainer_method: "gradient"  # "gradient" or "deep"
+  dynamic_num_background: 10  # Background samples for explainer
+  dynamic_num_analyze: 5  # Number of samples to analyze in detail
+  
+  # Output
+  output_dir: "outputs/shap_analysis_unet"
+
+# Feature names (for interpretability)
+feature_names:
+  static:
+    - "slope_average"
+    - "slope_std"
+    - "aspect_sin"
+    - "aspect_cos"
+    - "elevation_average"
+    - "elevation_std"
+    - "curvature_average"
+    - "curvature_std"
+    - "twi_average"
+    - "twi_std"
+    - "spi_average"
+    - "spi_std"
+    - "rock2_average"
+    - "soil1_average"
+    - "soil2_average"
+    - "dist_road"
+    - "dist_river"
+    - "dist_fault"
+    - "road_density"
+    - "river_density"
+    - "fault_density"
+  
+  dynamic:
+    - "acc3d"      # 3-day accumulated rainfall (raw pixel values)
+    - "acc7d"      # 7-day accumulated rainfall (raw pixel values)
+    - "peak1h"     # Peak 1-hour rainfall (raw pixel values)
+
